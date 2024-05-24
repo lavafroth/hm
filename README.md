@@ -10,6 +10,8 @@ cargo install --git https://github.com/lavafroth/hm.git
 
 ### Usage
 
+![A preview of setting render quality](/assets/preview.gif)
+
 Run `hm` in the current working project directory. This will start monitoring all the Python files in the directory for changes.
 If any modification is made to a file defining a Manim scene, it will get re-rendered.
 
@@ -19,6 +21,8 @@ either perform actions or enter their own context.
 There's also a one line legend at the bottom of the screen to indicate what keys you should press next for respective actions.
 
 #### Changing project directories
+
+![A preview of setting render quality](/assets/project_directory.gif)
 
 You may switch to a different project directory using `space`, `f` to enter the file picker. Use `hjkl` or the arrow keys to move
 around. Once you are in the directory you wish to monitor, hit `space`.
@@ -37,5 +41,7 @@ respective resolutions:
 - `k`: 4K
 
 #### Triggering a re-render
+
+![A preview of setting render quality](/assets/re_render.gif)
 
 For some reason, if you want to re-render the last file. Press `space`, `r` to trigger a re-render.
