@@ -20,7 +20,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::Alignment,
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
@@ -365,27 +365,84 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
     f.render_widget(status_line, chunks[0]);
 
     // bottom keymap legend
-    let mut explanation = "q -> exit | space -> begin chord";
+    let mut legend = vec![
+        LegendElement {
+            name: "q",
+            desc: "quit",
+        },
+        LegendElement {
+            name: "space",
+            desc: "begin chord",
+        },
+    ];
 
     if model.prev_was_space.is_some() {
-        explanation =
-            "q -> set quality | r -> trigger manual rerender | f -> choose working directory";
+        legend = vec![
+            LegendElement {
+                name: "q",
+                desc: "set quality",
+            },
+            LegendElement {
+                name: "r",
+                desc: "render last file",
+            },
+            LegendElement {
+                name: "f",
+                desc: "change working directory",
+            },
+        ];
     }
     if let Some(key) = model.chord {
         match key {
             Chord::FilePicker => {}
-            Chord::ReRender => {
-                explanation = "triggered render";
-            }
+            Chord::ReRender => {}
             Chord::SetQuality => {
-                explanation = "l -> 480p | m -> 720p | h -> 1080p | p -> 1440p | k -> 4K";
+                legend = vec![
+                    LegendElement {
+                        name: "l",
+                        desc: "480p",
+                    },
+                    LegendElement {
+                        name: "m",
+                        desc: "720p",
+                    },
+                    LegendElement {
+                        name: "h",
+                        desc: "1080p",
+                    },
+                    LegendElement {
+                        name: "p",
+                        desc: "1440p",
+                    },
+                    LegendElement {
+                        name: "k",
+                        desc: "4K",
+                    },
+                ];
             }
         }
     }
-    let explanation = Paragraph::new(explanation)
-        .style(Style::default().add_modifier(Modifier::BOLD).dark_gray())
-        .alignment(Alignment::Center);
-    f.render_widget(explanation, chunks[2]);
+    f.render_widget(explanation(&legend), chunks[2]);
+}
+
+struct LegendElement<'a> {
+    name: &'a str,
+    desc: &'a str,
+}
+
+fn explanation<'a>(legend: &[LegendElement<'a>]) -> Line<'a> {
+    let mut elements = vec![];
+    for entry in legend {
+        elements.push(Span::styled(
+            format!(" {} ", entry.name),
+            Style::new().on_white().black(),
+        ));
+        elements.push(Span::styled(
+            format!(" {} ", entry.desc),
+            Style::new().dark_gray(),
+        ));
+    }
+    Line::from(elements).alignment(Alignment::Center)
 }
 
 fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
@@ -403,11 +460,24 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         let header = "choose a directory to monitor for file changes";
         let header = Paragraph::new(header).style(Style::new().italic());
 
-        let explanation = "hjkl / ←↓↑→ -> move | space -> pick | ↵ -> enter a directory | q -> quit | esc -> cancel";
-        let explanation = Paragraph::new(explanation)
-            .style(Style::default().add_modifier(Modifier::BOLD).dark_gray())
-            .alignment(Alignment::Center);
-
+        let legend = vec![
+            LegendElement {
+                name: "q",
+                desc: "quit",
+            },
+            LegendElement {
+                name: "hjkl / ←↓↑→",
+                desc: "navigate",
+            },
+            LegendElement {
+                name: "space",
+                desc: "confirm",
+            },
+            LegendElement {
+                name: "esc",
+                desc: "cancel",
+            },
+        ];
         let size_ref = model.size.cols.saturating_sub(4);
         let theme = Theme::default().with_title_top(move |fp| {
             Line::from(truncate_string_to(
@@ -418,7 +488,7 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         fp.set_theme(theme);
         f.render_widget(header, chunks[0]);
         f.render_widget(&fp.widget(), chunks[1]);
-        f.render_widget(explanation, chunks[2]);
+        f.render_widget(explanation(&legend), chunks[2]);
         return;
     }
     main_ui(f, screen, model)
