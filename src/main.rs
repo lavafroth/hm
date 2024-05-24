@@ -185,7 +185,6 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
                 continue;
             }
 
-            let cwd = std::env::current_dir()?;
             let mut cmd = CommandBuilder::new("manim");
 
             cmd.args([
@@ -197,7 +196,7 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
                 model.quality.symbol(),
                 &name,
             ]);
-            cmd.cwd(cwd);
+            cmd.cwd(&model.directory);
             model.last_file = name;
             model.last_time = Instant::now();
 
@@ -302,8 +301,7 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
                     model.quality.symbol(),
                     &model.last_file,
                 ]);
-                let cwd = std::env::current_dir()?;
-                cmd.cwd(cwd);
+                cmd.cwd(&model.directory);
 
                 let pair = model.pty_system.openpty(PtySize {
                     rows: size.rows - 4,
@@ -429,7 +427,7 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         let header = "choose a directory to monitor for file changes";
         let header = Paragraph::new(header).style(Style::new().italic());
 
-        let explanation = "hjkl / ←↓↑→ -> move | space -> pick | enter -> enter a directory | q -> quit | esc -> cancel";
+        let explanation = "hjkl / ←↓↑→ -> move | space -> pick | ↵ -> enter a directory | q -> quit | esc -> cancel";
         let explanation = Paragraph::new(explanation)
             .style(Style::default().add_modifier(Modifier::BOLD).dark_gray())
             .alignment(Alignment::Center);
