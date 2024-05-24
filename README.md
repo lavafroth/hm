@@ -1,33 +1,37 @@
-### `hm`
+![A preview of setting render quality](/assets/preview.gif)
 
+## `hm` 🤔
+
+<p align="center">
 A rusty TUI to auto-render Manim animations on save.
+<a href="https://rust-reportcard.xuri.me/report/github.com/lavafroth/hm"><img src="https://rust-reportcard.xuri.me/badge/github.com/lavafroth/hm"></a>
+</p>
 
-### Installation
+
+## Installation
 
 ```sh
 cargo install --git https://github.com/lavafroth/hm.git
 ```
 
-### Usage
+## Usage
 
-![A preview of setting render quality](/assets/preview.gif)
+Run `hm` in a project directory to start monitoring all Python files in it for changes.
+If a Python file defining a Manim scene is modified, it will get re-rendered.
 
-Run `hm` in the current working project directory. This will start monitoring all the Python files in the directory for changes.
-If any modification is made to a file defining a Manim scene, it will get re-rendered.
-
-The keybinds in `hm` are inspired by helix and acts on key chords. You can press `space` to start a chord, further keys pressed
+The keybinds in `hm` are inspired by [helix](https://helix-editor.com/) key chords. Press `space` to begin a chord, further keys pressed
 either perform actions or enter their own context.
 
 There's also a one line legend at the bottom of the screen to indicate what keys you should press next for respective actions.
 
-#### Changing project directories
+### Changing project directory
 
 ![A preview of setting render quality](/assets/project_directory.gif)
 
 You may switch to a different project directory using `space`, `f` to enter the file picker. Use `hjkl` or the arrow keys to move
 around. Once you are in the directory you wish to monitor, hit `space`.
 
-#### Setting the render quality
+### Setting the render quality
 
 ![A preview of setting render quality](/assets/changing_quality.gif)
 
@@ -40,7 +44,7 @@ respective resolutions:
 - `p`: 1920p
 - `k`: 4K
 
-#### Triggering a re-render
+### Triggering a re-render
 
 ![A preview of setting render quality](/assets/re_render.gif)
 
