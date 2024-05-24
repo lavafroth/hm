@@ -25,6 +25,8 @@ around. Once you are in the directory you wish to monitor, hit `space`.
 
 #### Setting the render quality
 
+![A preview of setting render quality](/assets/changing_quality.gif)
+
 Begin a chord by pressing `space`, enter the quality settings context by pressing `q`. Now press one of the following keys for the
 respective resolutions:
 
