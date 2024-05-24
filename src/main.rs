@@ -1,4 +1,5 @@
 use anyhow::Result;
+use portable_pty::unix::UnixPtySystem;
 use ratatui_explorer::{FileExplorer, Theme};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -63,7 +64,18 @@ impl ToString for Quality {
     }
 }
 
-#[derive(Default)]
+impl Quality {
+    fn symbol(&self) -> &'static str {
+        match self {
+            Quality::L => "l",
+            Quality::M => "m",
+            Quality::H => "h",
+            Quality::P => "p",
+            Quality::K => "k",
+        }
+    }
+}
+
 struct Model {
     prev_was_space: Option<()>,
     chord: Option<Chord>,
@@ -71,6 +83,8 @@ struct Model {
     directory: PathBuf,
     pty_system: NativePtySystem,
     file_picker: Option<FileExplorer>,
+    last_file: String,
+    last_time: Instant,
 }
 
 impl Model {
@@ -104,7 +118,13 @@ fn main() -> Result<()> {
 
     let mut model = Model {
         directory: std::env::current_dir()?,
-        ..Default::default()
+        last_time: Instant::now(),
+        prev_was_space: None,
+        chord: None,
+        quality: Quality::L,
+        pty_system: UnixPtySystem::default(),
+        file_picker: None,
+        last_file: String::default(),
     };
 
     run(&mut terminal, size, &mut model)?;
@@ -124,7 +144,7 @@ impl EventHandler for EventSender {
                 if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) = event.kind {
                     for path in event
                         .paths
-                        .iter()
+                        .into_iter()
                         .filter(|p| p.extension().is_some_and(|ext| ext == "py"))
                     {
                         // re-render them
@@ -154,49 +174,71 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
     watcher.watch(&model.directory, RecursiveMode::Recursive)?;
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(10);
     let mut last_tick = Instant::now();
 
     loop {
         terminal.draw(|f| ui(f, parser.read().unwrap().screen(), model))?;
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if let Ok(name) = rx.try_recv() {
+            if model.last_file == name && model.last_time.elapsed() < Duration::from_millis(500) {
+                continue;
+            }
+
             let cwd = std::env::current_dir()?;
             let mut cmd = CommandBuilder::new("manim");
-            cmd.args(["render", "--preview", "--quality", "l", &name]);
+
+            cmd.args([
+                "render",
+                "--preview",
+                "--preview_command",
+                "mpv",
+                "--quality",
+                model.quality.symbol(),
+                &name,
+            ]);
             cmd.cwd(cwd);
+            model.last_file = name;
+            model.last_time = Instant::now();
 
             let pair = model.pty_system.openpty(PtySize {
                 rows: size.rows - 4,
-                cols: size.cols,
+                cols: size.cols - 4,
                 ..Default::default()
             })?;
 
-            let mut child = pair.slave.spawn_command(cmd)?;
-            drop(pair.slave);
-
-            let mut reader = pair.master.try_clone_reader()?;
-
             {
                 let parser = parser.clone();
+                let mut child = pair.slave.spawn_command(cmd)?;
+                let mut reader = pair.master.try_clone_reader()?;
                 std::thread::spawn(move || {
+                    drop(pair.slave);
+
                     // Consume the output from the child
-                    let mut s = String::default();
-                    reader.read_to_string(&mut s).unwrap();
-                    if !s.is_empty() {
-                        let mut parser = parser.write().unwrap();
-                        parser.process(s.as_bytes());
+                    let mut buf = [0u8; 8192];
+
+                    loop {
+                        match reader.read(&mut buf).unwrap() {
+                            0 => break,
+                            size => parser.write().unwrap().process(&buf[..size]),
+                        }
                     }
+                    // Drop writer on purpose
+                    pair.master.take_writer().unwrap();
+
+                    let exit = child.wait();
+                    if let Ok(exit) = exit {
+                        parser.write().unwrap().process(
+                            format!("\r\nmanim exited with code: {}\r\n", exit.exit_code())
+                                .as_bytes(),
+                        );
+                    }
+
+                    drop(pair.master);
+
+                    // Wait for signal
                 });
             }
-
-            // Drop writer on purpose
-            pair.master.take_writer()?;
-
-            // Wait for the child to complete
-            let _child_exit_status = child.wait()?;
-
-            drop(pair.master);
         }
 
         if crossterm::event::poll(timeout)? {
@@ -246,42 +288,61 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
 
             // Run the rendering command
             if let Some(Chord::ReRender) = model.chord {
-                let cwd = std::env::current_dir()?;
+                if model.last_file.is_empty() {
+                    continue;
+                }
                 let mut cmd = CommandBuilder::new("manim");
-                cmd.args(["render", "--help"]);
+
+                cmd.args([
+                    "render",
+                    "--preview",
+                    "--preview_command",
+                    "mpv",
+                    "--quality",
+                    model.quality.symbol(),
+                    &model.last_file,
+                ]);
+                let cwd = std::env::current_dir()?;
                 cmd.cwd(cwd);
 
                 let pair = model.pty_system.openpty(PtySize {
-                    rows: size.rows,
-                    cols: size.cols,
+                    rows: size.rows - 4,
+                    cols: size.cols - 4,
                     ..Default::default()
                 })?;
 
-                let mut child = pair.slave.spawn_command(cmd)?;
-                drop(pair.slave);
-
-                let mut reader = pair.master.try_clone_reader()?;
-
                 {
                     let parser = parser.clone();
+                    let mut child = pair.slave.spawn_command(cmd)?;
+                    let mut reader = pair.master.try_clone_reader()?;
                     std::thread::spawn(move || {
+                        drop(pair.slave);
+
                         // Consume the output from the child
-                        let mut s = String::new();
-                        reader.read_to_string(&mut s).unwrap();
-                        if !s.is_empty() {
-                            let mut parser = parser.write().unwrap();
-                            parser.process(s.as_bytes());
+                        let mut buf = [0u8; 8192];
+
+                        loop {
+                            match reader.read(&mut buf).unwrap() {
+                                0 => break,
+                                size => parser.write().unwrap().process(&buf[..size]),
+                            }
                         }
+                        // Drop writer on purpose
+                        pair.master.take_writer().unwrap();
+
+                        let exit = child.wait();
+                        if let Ok(exit) = exit {
+                            parser.write().unwrap().process(
+                                format!("\r\nmanim exited with code: {}\r\n", exit.exit_code())
+                                    .as_bytes(),
+                            );
+                        }
+
+                        drop(pair.master);
+
+                        // Wait for signal
                     });
                 }
-
-                // Drop writer on purpose
-                pair.master.take_writer()?;
-
-                // Wait for the child to complete
-                let _child_exit_status = child.wait()?;
-
-                drop(pair.master);
             }
         }
         if last_tick.elapsed() >= tick_rate {
@@ -368,7 +429,7 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         let header = "choose a directory to monitor for file changes";
         let header = Paragraph::new(header).style(Style::new().italic());
 
-        let explanation = "hjkl / arrow keys -> move | space -> pick | enter -> enter a directory | q -> quit | esc -> cancel";
+        let explanation = "hjkl / ←↓↑→ -> move | space -> pick | enter -> enter a directory | q -> quit | esc -> cancel";
         let explanation = Paragraph::new(explanation)
             .style(Style::default().add_modifier(Modifier::BOLD).dark_gray())
             .alignment(Alignment::Center);
