@@ -1,5 +1,6 @@
 use anyhow::Result;
 use portable_pty::unix::UnixPtySystem;
+use ratatui::layout::Constraint;
 use ratatui_explorer::{FileExplorer, Theme};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -85,14 +86,14 @@ struct Model {
     file_picker: Option<FileExplorer>,
     last_file: String,
     last_time: Instant,
+    size: Size,
 }
 
 impl Model {
     fn ingest_chord(&mut self, keycode: KeyCode) {
         self.chord = match keycode {
             KeyCode::Char('f') => {
-                let theme = Theme::default().add_default_title();
-                let fp = FileExplorer::with_theme(theme).unwrap();
+                let fp = FileExplorer::new().unwrap();
                 self.file_picker = Some(fp);
                 Some(Chord::FilePicker)
             }
@@ -111,6 +112,58 @@ impl Model {
             _ => Quality::L,
         };
     }
+
+    fn render(&mut self, parser: Arc<RwLock<vt100::Parser>>, name: &str) -> Result<()> {
+        let mut cmd = CommandBuilder::new("manim");
+
+        cmd.args([
+            "render",
+            "--preview",
+            "--preview_command",
+            "mpv",
+            "--quality",
+            self.quality.symbol(),
+            &name,
+        ]);
+        cmd.cwd(&self.directory);
+
+        let pair = self.pty_system.openpty(PtySize {
+            rows: self.size.rows - 4,
+            cols: self.size.cols - 4,
+            ..Default::default()
+        })?;
+
+        {
+            let parser = parser.clone();
+            let mut child = pair.slave.spawn_command(cmd)?;
+            let mut reader = pair.master.try_clone_reader()?;
+            std::thread::spawn(move || {
+                drop(pair.slave);
+
+                // Consume the output from the child
+                let mut buf = [0u8; 8192];
+
+                loop {
+                    match reader.read(&mut buf).unwrap() {
+                        0 => break,
+                        size => parser.write().unwrap().process(&buf[..size]),
+                    }
+                }
+                // Drop writer on purpose
+                pair.master.take_writer().unwrap();
+
+                let exit = child.wait();
+                if let Ok(exit) = exit {
+                    parser.write().unwrap().process(
+                        format!("\r\nmanim exited with code: {}\r\n", exit.exit_code()).as_bytes(),
+                    );
+                }
+
+                drop(pair.master);
+            });
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -125,9 +178,10 @@ fn main() -> Result<()> {
         pty_system: UnixPtySystem::default(),
         file_picker: None,
         last_file: String::default(),
+        size,
     };
 
-    run(&mut terminal, size, &mut model)?;
+    run(&mut terminal, &mut model)?;
 
     cleanup_terminal(&mut terminal)?;
     Ok(())
@@ -159,10 +213,10 @@ impl EventHandler for EventSender {
     }
 }
 
-fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) -> Result<()> {
+fn run<B: Backend>(terminal: &mut Terminal<B>, model: &mut Model) -> Result<()> {
     let parser = Arc::new(RwLock::new(vt100::Parser::new(
-        size.rows - 1,
-        size.cols - 1,
+        model.size.rows - 1,
+        model.size.cols - 1,
         0,
     )));
 
@@ -179,68 +233,22 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
 
     loop {
         terminal.draw(|f| ui(f, parser.read().unwrap().screen(), model))?;
+        let t_size = terminal.get_frame().size();
+        model.size = Size {
+            cols: t_size.width,
+            rows: t_size.height,
+        };
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if let Ok(name) = rx.try_recv() {
             if model.last_file == name && model.last_time.elapsed() < Duration::from_millis(500) {
                 continue;
             }
-
-            let mut cmd = CommandBuilder::new("manim");
-
-            cmd.args([
-                "render",
-                "--preview",
-                "--preview_command",
-                "mpv",
-                "--quality",
-                model.quality.symbol(),
-                &name,
-            ]);
-            cmd.cwd(&model.directory);
+            model.render(parser.clone(), &name)?;
             model.last_file = name;
             model.last_time = Instant::now();
-
-            let pair = model.pty_system.openpty(PtySize {
-                rows: size.rows - 4,
-                cols: size.cols - 4,
-                ..Default::default()
-            })?;
-
-            {
-                let parser = parser.clone();
-                let mut child = pair.slave.spawn_command(cmd)?;
-                let mut reader = pair.master.try_clone_reader()?;
-                std::thread::spawn(move || {
-                    drop(pair.slave);
-
-                    // Consume the output from the child
-                    let mut buf = [0u8; 8192];
-
-                    loop {
-                        match reader.read(&mut buf).unwrap() {
-                            0 => break,
-                            size => parser.write().unwrap().process(&buf[..size]),
-                        }
-                    }
-                    // Drop writer on purpose
-                    pair.master.take_writer().unwrap();
-
-                    let exit = child.wait();
-                    if let Ok(exit) = exit {
-                        parser.write().unwrap().process(
-                            format!("\r\nmanim exited with code: {}\r\n", exit.exit_code())
-                                .as_bytes(),
-                        );
-                    }
-
-                    drop(pair.master);
-
-                    // Wait for signal
-                });
-            }
         }
 
-        if crossterm::event::poll(timeout)? {
+        if event::poll(timeout)? {
             let read_event = event::read()?;
 
             // Send keystrokes to file picker if we are in a file picker view
@@ -287,60 +295,11 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
 
             // Run the rendering command
             if let Some(Chord::ReRender) = model.chord {
-                if model.last_file.is_empty() {
+                let name = model.last_file.clone();
+                if name.is_empty() {
                     continue;
                 }
-                let mut cmd = CommandBuilder::new("manim");
-
-                cmd.args([
-                    "render",
-                    "--preview",
-                    "--preview_command",
-                    "mpv",
-                    "--quality",
-                    model.quality.symbol(),
-                    &model.last_file,
-                ]);
-                cmd.cwd(&model.directory);
-
-                let pair = model.pty_system.openpty(PtySize {
-                    rows: size.rows - 4,
-                    cols: size.cols - 4,
-                    ..Default::default()
-                })?;
-
-                {
-                    let parser = parser.clone();
-                    let mut child = pair.slave.spawn_command(cmd)?;
-                    let mut reader = pair.master.try_clone_reader()?;
-                    std::thread::spawn(move || {
-                        drop(pair.slave);
-
-                        // Consume the output from the child
-                        let mut buf = [0u8; 8192];
-
-                        loop {
-                            match reader.read(&mut buf).unwrap() {
-                                0 => break,
-                                size => parser.write().unwrap().process(&buf[..size]),
-                            }
-                        }
-                        // Drop writer on purpose
-                        pair.master.take_writer().unwrap();
-
-                        let exit = child.wait();
-                        if let Ok(exit) = exit {
-                            parser.write().unwrap().process(
-                                format!("\r\nmanim exited with code: {}\r\n", exit.exit_code())
-                                    .as_bytes(),
-                            );
-                        }
-
-                        drop(pair.master);
-
-                        // Wait for signal
-                    });
-                }
+                model.render(parser.clone(), &name)?;
             }
         }
         if last_tick.elapsed() >= tick_rate {
@@ -349,31 +308,53 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, size: Size, model: &mut Model) ->
     }
 }
 
+fn truncate_string_by(s: &str, by: usize) -> String {
+    if by == 0 {
+        return s.to_string();
+    }
+    let cut_len = by / 2;
+    let center = s.len() / 2;
+    let left = center.saturating_sub(cut_len + 4);
+    let right = center.saturating_add(cut_len + 4);
+    let left = left.min(center);
+    let right = right.max(center);
+    format!("{}[...]{}", &s[..left], &s[right..])
+}
+
+fn truncate_string_to(s: &str, to: usize) -> String {
+    let by = s.len().saturating_sub(to);
+    truncate_string_by(s, by)
+}
+
 fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
     let chunks = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .margin(1)
-        .constraints(
-            [
-                ratatui::layout::Constraint::Min(2),
-                ratatui::layout::Constraint::Percentage(100),
-                ratatui::layout::Constraint::Min(1),
-            ]
-            .as_ref(),
-        )
+        .constraints(&[
+            Constraint::Min(2),
+            Constraint::Percentage(100),
+            Constraint::Min(1),
+        ])
         .split(f.size());
     let title = Line::from(" manim output ");
     let block = Block::default().borders(Borders::ALL).title(title);
     let pseudo_term = PseudoTerminal::new(screen).block(block);
     f.render_widget(pseudo_term, chunks[1]);
 
+    let dir = model.directory.to_string_lossy().into_owned();
+    let status_line_len = format!(
+        "rendering files in {} at {} quality",
+        dir,
+        model.quality.to_string()
+    )
+    .len();
+    let truncate = status_line_len.saturating_sub(model.size.cols.into());
+    let dir = truncate_string_by(&dir, truncate as usize);
+
     // top status line
     let status_line = Line::from(vec![
         Span::raw("Rendering files in "),
-        Span::styled(
-            model.directory.display().to_string(),
-            Style::new().fg(Color::Blue).italic(),
-        ),
+        Span::styled(dir, Style::new().fg(Color::Blue).italic()),
         Span::raw(" at "),
         Span::styled(
             model.quality.to_string(),
@@ -392,9 +373,7 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
     }
     if let Some(key) = model.chord {
         match key {
-            Chord::FilePicker => {
-                explanation = "file picker";
-            }
+            Chord::FilePicker => {}
             Chord::ReRender => {
                 explanation = "triggered render";
             }
@@ -410,18 +389,15 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
 }
 
 fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
-    if let Some(fp) = &model.file_picker {
+    if let Some(fp) = model.file_picker.as_mut() {
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .margin(1)
-            .constraints(
-                [
-                    ratatui::layout::Constraint::Min(2),
-                    ratatui::layout::Constraint::Percentage(100),
-                    ratatui::layout::Constraint::Min(1),
-                ]
-                .as_ref(),
-            )
+            .constraints(&[
+                Constraint::Min(2),
+                Constraint::Percentage(100),
+                Constraint::Min(1),
+            ])
             .split(f.size());
 
         let header = "choose a directory to monitor for file changes";
@@ -432,6 +408,14 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
             .style(Style::default().add_modifier(Modifier::BOLD).dark_gray())
             .alignment(Alignment::Center);
 
+        let size_ref = model.size.cols.saturating_sub(4);
+        let theme = Theme::default().with_title_top(move |fp| {
+            Line::from(truncate_string_to(
+                fp.cwd().to_string_lossy().as_ref(),
+                size_ref as usize,
+            ))
+        });
+        fp.set_theme(theme);
         f.render_widget(header, chunks[0]);
         f.render_widget(&fp.widget(), chunks[1]);
         f.render_widget(explanation, chunks[2]);
