@@ -330,7 +330,7 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
     let chunks = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .margin(1)
-        .constraints(&[
+        .constraints([
             Constraint::Min(2),
             Constraint::Percentage(100),
             Constraint::Min(1),
@@ -349,7 +349,7 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
     )
     .len();
     let truncate = status_line_len.saturating_sub(model.size.cols.into());
-    let dir = truncate_string_by(&dir, truncate as usize);
+    let dir = truncate_string_by(&dir, truncate);
 
     // top status line
     let status_line = Line::from(vec![
@@ -450,7 +450,7 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .margin(1)
-            .constraints(&[
+            .constraints([
                 Constraint::Min(2),
                 Constraint::Percentage(100),
                 Constraint::Min(1),
