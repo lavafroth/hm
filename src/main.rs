@@ -90,6 +90,13 @@ struct Model {
 }
 
 impl Model {
+    fn pty_size(&self) -> Size {
+        Size {
+            rows: self.size.rows - 6,
+            cols: self.size.cols - 4,
+        }
+    }
+
     fn ingest_chord(&mut self, keycode: KeyCode) {
         self.chord = match keycode {
             KeyCode::Char('f') => {
@@ -127,9 +134,11 @@ impl Model {
         ]);
         cmd.cwd(&self.directory);
 
+        let Size { rows, cols } = self.pty_size();
+
         let pair = self.pty_system.openpty(PtySize {
-            rows: self.size.rows - 4,
-            cols: self.size.cols - 4,
+            rows,
+            cols,
             ..Default::default()
         })?;
 
@@ -214,11 +223,8 @@ impl EventHandler for EventSender {
 }
 
 fn run<B: Backend>(terminal: &mut Terminal<B>, model: &mut Model) -> Result<()> {
-    let parser = Arc::new(RwLock::new(vt100::Parser::new(
-        model.size.rows - 1,
-        model.size.cols - 1,
-        0,
-    )));
+    let Size { cols, rows } = model.pty_size();
+    let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
 
     let (tx, rx) = channel();
     let es = EventSender { tx };
