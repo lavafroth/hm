@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use portable_pty::unix::UnixPtySystem;
 use ratatui::layout::Constraint;
 use ratatui_explorer::{FileExplorer, Theme};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::{
     io::{self, BufWriter},
@@ -19,7 +20,6 @@ use notify::{EventHandler, RecursiveMode, Watcher};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::Alignment,
     style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -28,6 +28,8 @@ use ratatui::{
 use tui_term::vt100;
 use tui_term::vt100::Screen;
 use tui_term::widget::PseudoTerminal;
+pub mod legend;
+use legend::LegendIterator;
 
 #[derive(Debug, Clone)]
 struct Size {
@@ -39,6 +41,7 @@ struct Size {
 enum Chord {
     FilePicker,
     ReRender,
+    Move,
     SetQuality,
 }
 
@@ -85,6 +88,7 @@ struct Model {
     pty_system: NativePtySystem,
     file_picker: Option<FileExplorer>,
     last_file: String,
+    rendered_to: Arc<Mutex<Option<String>>>,
     last_time: Instant,
     size: Size,
 }
@@ -106,6 +110,7 @@ impl Model {
             }
             KeyCode::Char('q') => Some(Chord::SetQuality),
             KeyCode::Char('r') => Some(Chord::ReRender),
+            KeyCode::Char('m') => Some(Chord::Move),
             _ => None,
         };
     }
@@ -130,10 +135,36 @@ impl Model {
             "mpv",
             "--quality",
             self.quality.symbol(),
-            &name,
+            name,
         ]);
         cmd.cwd(&self.directory);
+        self.run_command(parser, cmd)
+    }
+    fn move_to_workdir(&mut self, _parser: Arc<RwLock<vt100::Parser>>) -> Result<()> {
+        let Some(name) = ({
+            // jesus rust is fucking high
+            let Ok(mut name_handle) = self.rendered_to.lock() else {
+                bail!("failed to lock handle on last rendered filename");
+            };
+            name_handle.take()
+        }) else {
+            return Ok(());
+        };
 
+        let Some(home) = homedir::my_home()? else {
+            bail!("failed to get home directory for the current user");
+        };
+
+        let videos = home.join("Videos");
+        std::fs::rename(name, videos)?;
+        Ok(())
+    }
+
+    fn run_command(
+        &mut self,
+        parser: Arc<RwLock<vt100::Parser>>,
+        cmd: CommandBuilder,
+    ) -> Result<()> {
         let Size { rows, cols } = self.pty_size();
 
         let pair = self.pty_system.openpty(PtySize {
@@ -146,23 +177,40 @@ impl Model {
             let parser = parser.clone();
             let mut child = pair.slave.spawn_command(cmd)?;
             let mut reader = pair.master.try_clone_reader()?;
+            let filename = self.rendered_to.clone();
             std::thread::spawn(move || {
                 drop(pair.slave);
 
-                // Consume the output from the child
+                // Consume the output from the child process
                 let mut buf = [0u8; 8192];
 
                 loop {
                     match reader.read(&mut buf).unwrap() {
                         0 => break,
-                        size => parser.write().unwrap().process(&buf[..size]),
+                        size => {
+                            let buf_string = String::from_utf8_lossy(&buf);
+                            let Some(start) = buf_string.find("media") else {
+                                continue;
+                            };
+                            let haystack = &buf_string[start..];
+                            let end = haystack
+                                .find(".mp4")
+                                .or(haystack.find(".mov"))
+                                .or(haystack.find(".png"));
+                            let Some(end) = end else {
+                                continue;
+                            };
+                            let rendered_filename = haystack[..end + 4].to_owned();
+                            filename.lock().unwrap().replace(rendered_filename);
+
+                            parser.write().unwrap().process(&buf[..size])
+                        }
                     }
                 }
                 // Drop writer on purpose
                 pair.master.take_writer().unwrap();
 
-                let exit = child.wait();
-                if let Ok(exit) = exit {
+                if let Ok(exit) = child.wait() {
                     parser.write().unwrap().process(
                         format!("\r\nmanim exited with code: {}\r\n", exit.exit_code()).as_bytes(),
                     );
@@ -183,6 +231,7 @@ fn main() -> Result<()> {
         last_time: Instant::now(),
         prev_was_space: None,
         chord: None,
+        rendered_to: Arc::new(Mutex::new(None)),
         quality: Quality::L,
         pty_system: UnixPtySystem::default(),
         file_picker: None,
@@ -299,13 +348,15 @@ fn run<B: Backend>(terminal: &mut Terminal<B>, model: &mut Model) -> Result<()> 
                 }
             }
 
+            let name = &model.last_file;
+            if name.is_empty() {
+                continue;
+            }
             // Run the rendering command
-            if let Some(Chord::ReRender) = model.chord {
-                let name = model.last_file.clone();
-                if name.is_empty() {
-                    continue;
-                }
-                model.render(parser.clone(), &name)?;
+            match model.chord {
+                Some(Chord::ReRender) => model.render(parser.clone(), &name.clone())?,
+                Some(Chord::Move) => model.move_to_workdir(parser.clone())?,
+                _ => (),
             }
         }
         if last_tick.elapsed() >= tick_rate {
@@ -372,83 +423,33 @@ fn main_ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
 
     // bottom keymap legend
     let mut legend = vec![
-        LegendElement {
-            name: "q",
-            desc: "quit",
-        },
-        LegendElement {
-            name: "space",
-            desc: "begin chord",
-        },
+        legend::Element::new("q", "quit"),
+        legend::Element::new("space", "begin chord"),
     ];
 
     if model.prev_was_space.is_some() {
         legend = vec![
-            LegendElement {
-                name: "q",
-                desc: "set quality",
-            },
-            LegendElement {
-                name: "r",
-                desc: "render last file",
-            },
-            LegendElement {
-                name: "f",
-                desc: "change working directory",
-            },
+            legend::Element::new("q", "set quality"),
+            legend::Element::new("r", "render last file"),
+            legend::Element::new("m", "move last render to work directory"),
+            legend::Element::new("f", "change working directory"),
         ];
     }
     if let Some(key) = model.chord {
         match key {
-            Chord::FilePicker => {}
-            Chord::ReRender => {}
+            Chord::FilePicker | Chord::Move | Chord::ReRender => {}
             Chord::SetQuality => {
                 legend = vec![
-                    LegendElement {
-                        name: "l",
-                        desc: "480p",
-                    },
-                    LegendElement {
-                        name: "m",
-                        desc: "720p",
-                    },
-                    LegendElement {
-                        name: "h",
-                        desc: "1080p",
-                    },
-                    LegendElement {
-                        name: "p",
-                        desc: "1440p",
-                    },
-                    LegendElement {
-                        name: "k",
-                        desc: "4K",
-                    },
+                    legend::Element::new("l", "480p"),
+                    legend::Element::new("m", "720p"),
+                    legend::Element::new("h", "1080p"),
+                    legend::Element::new("p", "1440p"),
+                    legend::Element::new("k", "4K"),
                 ];
             }
         }
     }
-    f.render_widget(explanation(&legend), chunks[2]);
-}
-
-struct LegendElement<'a> {
-    name: &'a str,
-    desc: &'a str,
-}
-
-fn explanation<'a>(legend: &[LegendElement<'a>]) -> Line<'a> {
-    let mut elements = vec![];
-    for entry in legend {
-        elements.push(Span::styled(
-            format!(" {} ", entry.name),
-            Style::new().on_white().black(),
-        ));
-        elements.push(Span::styled(
-            format!(" {} ", entry.desc),
-            Style::new().dark_gray(),
-        ));
-    }
-    Line::from(elements).alignment(Alignment::Center)
+    f.render_widget(legend.iter().render(), chunks[2]);
 }
 
 fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
@@ -467,22 +468,10 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         let header = Paragraph::new(header).style(Style::new().italic());
 
         let legend = vec![
-            LegendElement {
-                name: "q",
-                desc: "quit",
-            },
-            LegendElement {
-                name: "hjkl / ←↓↑→",
-                desc: "navigate",
-            },
-            LegendElement {
-                name: "space",
-                desc: "confirm",
-            },
-            LegendElement {
-                name: "esc",
-                desc: "cancel",
-            },
+            legend::Element::new("q", "quit"),
+            legend::Element::new("hjkl / ←↓↑→", "navigate"),
+            legend::Element::new("space", "confirm"),
+            legend::Element::new("esc", "cancel"),
         ];
         let size_ref = model.size.cols.saturating_sub(4);
         let theme = Theme::default().with_title_top(move |fp| {
@@ -494,7 +483,7 @@ fn ui(f: &mut Frame, screen: &Screen, model: &mut Model) {
         fp.set_theme(theme);
         f.render_widget(header, chunks[0]);
         f.render_widget(&fp.widget(), chunks[1]);
-        f.render_widget(explanation(&legend), chunks[2]);
+        f.render_widget(legend.iter().render(), chunks[2]);
         return;
     }
     main_ui(f, screen, model)
