@@ -1,22 +1,32 @@
 {
-  description = "devshell for github:lavafroth/hm";
+  description = "github:lavafroth/hm CLI utility to render manim animations on save";
 
-  inputs.flake-utils.url = "github:numtide/flake-utils";
+  inputs = {
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem
-      (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
+  outputs =
+    inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+      perSystem =
+        { pkgs, ... }:
         {
-          devShells.default = pkgs.mkShell rec {
-            packages = with pkgs;
-            [
-              stdenv.cc.cc.lib
-            ];
-
-            LD_LIBRARY_PATH = "${nixpkgs.lib.makeLibraryPath packages}";
-            LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib";
+          devShells.default = pkgs.mkShell {
+            packages = with pkgs; [ stdenv.cc.cc.lib ];
+            LD_LIBRARY_PATH = pkgs.stdenv.cc.cc.lib.LIBRARY_PATH;
           };
-        }
-      );
+          packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+            pname = "hm";
+            version = "1.0.0";
+            src = ./.;
+          };
+        };
+    };
 }

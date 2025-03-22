@@ -4,10 +4,18 @@
 A rusty TUI to auto-render Manim animations on save.
 
 
-### Installation
+### Try it out
+
+#### Via Cargo
 
 ```sh
 cargo install --git https://github.com/lavafroth/hm.git
+```
+
+#### Via Nix (with flakes)
+
+```
+nix run github:lavafroth/hm
 ```
 
 ### Usage
